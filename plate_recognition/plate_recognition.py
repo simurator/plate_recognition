@@ -1,14 +1,15 @@
-﻿import cv2
+import cv2
 import numpy as np
 import imutils
 import easyocr
-import csv
-import os
+import requests
 import tkinter as tk
 from PIL import Image, ImageTk
 import threading
 import winsound  # Tylko Windows
 import re
+import json
+
 
 # === Funkcja Levenshteina ===
 def levenshtein_distance(s1, s2):
@@ -31,28 +32,45 @@ def is_similar(plate1, plate2, max_distance=2):
     return levenshtein_distance(plate1, plate2) <= max_distance
 
 def normalize_text(text):
-    # Pozostawia tylko duże litery A-Z i cyfry 0-9
     return re.sub(r'[^A-Z0-9]', '', text.upper())
 
-# === OCR Reader i CSV inicjalizacja ===
+# === OCR Reader ===
 reader = easyocr.Reader(['en'])
-recognized_plates = set()
-csv_filename = 'recognized_text.csv'
 
-# Wczytanie zapisanych tablic (tylko nazwy, bez confidence)
-if os.path.exists(csv_filename):
-    with open(csv_filename, mode='r') as file:
-        reader_csv = csv.reader(file)
-        next(reader_csv, None)  # pomijamy nagłówek
-        for row in reader_csv:
-            if row:
-                recognized_plates.add(normalize_text(row[0]))
+# === Pobierz tablice z API ===
+recognized_plates = set()
+
+def fetch_plates_from_api():
+    try:
+        response = requests.get("https://api-site-blush.vercel.app/api/data")
+        if response.status_code == 200:
+            data = json.loads(response.text)
+            message = data.get("message", "")
+            words = message.split()
+            for word in words:
+                normalized = normalize_text(word)
+                if normalized:
+                    recognized_plates.add(normalized)
+            print(f"✅ Załadowano {len(recognized_plates)} tablic z API.")
+        else:
+            print(f"❌ Błąd API: {response.status_code}")
+    except Exception as e:
+        print(f"❌ Błąd podczas pobierania danych z API: {e}")
+
+
 
 # === GUI ===
 root = tk.Tk()
 root.title("Rozpoznawanie Tablic - Kamera")
 label = tk.Label(root)
 label.pack()
+
+def periodic_fetch():
+    recognized_plates.clear()
+    fetch_plates_from_api()
+    root.after(300_000, periodic_fetch)  # co 5 minut
+
+periodic_fetch()
 
 # === Kamera ===
 cap = cv2.VideoCapture(0)
@@ -64,7 +82,6 @@ def update_frame():
 
     display_frame = frame.copy()
 
-    # Rozpoznawanie
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     bfilter = cv2.bilateralFilter(gray, 11, 17, 17)
     edged = cv2.Canny(bfilter, 30, 200)
@@ -96,15 +113,13 @@ def update_frame():
             if confidence > 0.5 and text:
                 is_duplicate = any(is_similar(text, existing) for existing in recognized_plates)
                 if is_duplicate:
-                    print(f"🚨 Wykryto istniejaca tablice: {text}")
+                    print(f"🚨 Wykryto istniejacą tablicę: {text}")
                     threading.Thread(target=winsound.Beep, args=(1000, 300), daemon=True).start()
 
-                # Rysuj na obrazie
                 cv2.putText(display_frame, text, (location[0][0][0], location[1][0][1] + 50),
                             cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
                 cv2.rectangle(display_frame, tuple(location[0][0]), tuple(location[2][0]), (0, 255, 0), 3)
 
-    # Przeksztalc obraz do formatu zrozumialego dla Tkintera
     img = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
     img = Image.fromarray(img)
     imgtk = ImageTk.PhotoImage(image=img)
@@ -112,7 +127,6 @@ def update_frame():
     label.configure(image=imgtk)
     root.after(30, update_frame)
 
-# Start przetwarzania obrazu
 update_frame()
 root.protocol("WM_DELETE_WINDOW", lambda: (cap.release(), root.destroy()))
 root.mainloop()
